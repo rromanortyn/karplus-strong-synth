@@ -1,0 +1,20 @@
+# Compiled plugin and build outputs
+*.vst3
+Build/
+Builds/
+build/
+
+# Visual Studio generated files
+.vs/
+x64/
+Debug/
+Release/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Temporary and system files
+.vscode/
+.DS_Store
+Thumbs.db
