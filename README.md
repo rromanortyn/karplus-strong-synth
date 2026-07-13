@@ -40,6 +40,16 @@ The instrument is designed as a flexible synthetic plucked-string synthesiser ra
 4. Build the VST3 plugin.
 5. Scan the generated plugin in a compatible DAW.
 
+## Documentation
+
+More detailed technical documentation is available here:
+
+1. [Context and project aims](docs/01-context-and-aims.md)
+2. [Synthesis design and implementation](docs/02-synthesis-design.md)
+3. [Pattern generator and creative use](docs/03-pattern-generator.md)
+4. [Limitations and future development](docs/04-limitations-and-future-work.md)
+
+
 ## Academic context
 
 This project was originally developed for an Audio Programming assignment as part of the MSc Acoustics and Music Technology programme at the University of Edinburgh.
