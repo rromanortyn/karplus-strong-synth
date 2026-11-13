@@ -6,7 +6,8 @@ When a MIDI note is received, the MIDI note number is converted into a
 frequency. This frequency determines the delay length of the virtual
 string.
 
-A short noise burst excites the delay line. The delayed signal is then
+White noise, filtered noise, or a triangular impulse excites the delay line,
+scaled by excitation amount and MIDI velocity. The delayed signal is then
 passed through a damping filter and decay gain before being fed back into
 the delay line.
 
@@ -25,8 +26,10 @@ allowing the pluck to sound softer or sharper.
 
 ### Damping
 
-Damping operates inside the feedback loop and controls how quickly
-high-frequency energy disappears.
+Damping is the one-pole feedback filter's alpha coefficient (0.05–1).
+Smaller values produce a softer, faster-decaying sound; larger values preserve
+high frequencies. The delay is tuned to compensate for the filter and selected
+linear/allpass interpolator. See [reference conformance](reference-conformance.md).
 
 ### Pick Position
 

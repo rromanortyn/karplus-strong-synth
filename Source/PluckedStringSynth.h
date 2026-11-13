@@ -1,364 +1,215 @@
-/*
-  ==============================================================================
-
-    PluckedStringSynth.h
-    Created: 2026 April
-    For Audio Programming Assignment 3
-
-  ==============================================================================
-*/
-
 #pragma once
-
-#include <JuceHeader.h>
-#include <cmath>
-
 #include "KarplusStrongModel.h"
 #include "BodyResonator.h"
+#include <array>
+#include <cstdint>
 
-/**
- * Sound class for the plucked-string synthesiser.
- *
- * This sound can be triggered by any MIDI note on any MIDI channel. The actual
- * synthesis is implemented in PluckedStringSynthVoice.
- */
-class PluckedStringSynthSound : public juce::SynthesiserSound
+class PluckedStringSynthVoice
 {
 public:
-    bool appliesToNote(int midiNoteNumber) override
+    void prepare(double rate)
     {
-        juce::ignoreUnused(midiNoteNumber);
-        return true;
+        sampleRate = rate;
+        fadeLength = juce::jmax(1, static_cast<int>(rate * 0.005));
+        releaseMultiplier = static_cast<float>(std::exp(-6.907755 / (rate * 0.2)));
+        for (auto& bank : banks)
+        {
+            bank.left.prepare(rate); bank.right.prepare(rate); bank.body.prepare(rate);
+            bank.active = false;
+        }
+        fadeRemaining = 0;
     }
-
-    bool appliesToChannel(int midiChannel) override
+    void setParameters(const StringParameters& p) noexcept
     {
-        juce::ignoreUnused(midiChannel);
-        return true;
+        const bool retune = parameters.detune != p.detune;
+        parameters = p;
+        for (auto& bank : banks)
+        {
+            bank.left.setParameters(p); bank.right.setParameters(p); bank.body.setAmount(p.body);
+            if (retune && bank.active) tune(bank, bank.bend, false);
+        }
     }
+    void start(int note, int channel, float velocity, float bend, uint64_t age) noexcept
+    {
+        const bool stealing = isActive();
+        const int next = 1 - current;
+        if (stealing) { banks[current].releasing = true; fadeRemaining = fadeLength; }
+        else fadeRemaining = 0;
+        current = next;
+        auto& bank = banks[current];
+        bank.note = note; bank.channel = channel; bank.age = age;
+        bank.velocity = velocity; bank.active = true; bank.releasing = false; bank.keyDown = true;
+        bank.level = stealing ? 1.0f : 0.0f;
+        bank.body.reset();
+        tune(bank, bend, true);
+    }
+    void noteOff(int note, int channel, bool sustain) noexcept
+    {
+        for (auto& bank : banks)
+            if (bank.active && bank.note == note && bank.channel == channel)
+            {
+                bank.keyDown = false;
+                if (!sustain) bank.releasing = true;
+            }
+    }
+    void releaseSustain(int channel) noexcept
+    {
+        for (auto& bank : banks)
+            if (bank.channel == channel && !bank.keyDown) bank.releasing = true;
+    }
+    void allNotesOff(int channel, bool immediately) noexcept
+    {
+        for (auto& bank : banks)
+            if (channel == 0 || bank.channel == channel)
+            {
+                bank.keyDown = false; bank.releasing = true;
+                if (immediately) bank.active = false;
+            }
+    }
+    void pitchBend(int channel, float bend) noexcept
+    {
+        for (auto& bank : banks)
+            if (bank.active && bank.channel == channel) tune(bank, bend, false);
+    }
+    void render(float& left, float& right) noexcept
+    {
+        float l = 0.0f, r = 0.0f;
+        renderBank(banks[current], l, r);
+        if (fadeRemaining > 0)
+        {
+            float oldL = 0.0f, oldR = 0.0f;
+            renderBank(banks[1 - current], oldL, oldR);
+            const float mix = 1.0f - static_cast<float>(fadeRemaining--) / static_cast<float>(fadeLength);
+            l = oldL * (1.0f - mix) + l * mix;
+            r = oldR * (1.0f - mix) + r * mix;
+            if (fadeRemaining == 0) banks[1 - current].active = false;
+        }
+        left += l * 0.25f; right += r * 0.25f;
+    }
+    bool isActive() const noexcept { return banks[current].active || fadeRemaining > 0; }
+    uint64_t age() const noexcept { return banks[current].age; }
+    void copySnapshot(float* data, int count) const noexcept { banks[current].left.copySnapshot(data, count); }
+private:
+    struct Bank
+    {
+        KarplusStrongString left, right;
+        BodyResonator body;
+        bool active = false, releasing = false, keyDown = false;
+        int note = 60, channel = 1;
+        uint64_t age = 0;
+        float velocity = 0.0f, bend = 0.0f, level = 0.0f;
+    };
+    void tune(Bank& bank, float bend, bool pluck) noexcept
+    {
+        bank.bend = bend;
+        const float hz = 440.0f * std::pow(2.0f, (static_cast<float>(bank.note) - 69.0f + bend) / 12.0f);
+        const float spread = std::pow(2.0f, parameters.detune / 2400.0f);
+        if (pluck)
+        {
+            bank.left.pluck(hz / spread, bank.velocity);
+            bank.right.pluck(hz * spread, bank.velocity);
+        }
+        else { bank.left.tune(hz / spread, false); bank.right.tune(hz * spread, false); }
+    }
+    void renderBank(Bank& bank, float& l, float& r) noexcept
+    {
+        if (!bank.active) return;
+        const float a = bank.left.process(), b = bank.right.process();
+        const float centre = bank.body.process(0.5f * (a + b));
+        const float side = (a - b) * 0.5f * parameters.stereoWidth;
+        if (bank.releasing) bank.level *= releaseMultiplier;
+        else bank.level = juce::jmin(1.0f, bank.level + static_cast<float>(1.0 / (sampleRate * 0.001)));
+        l = (centre + side) * bank.level; r = (centre - side) * bank.level;
+        if (bank.level < 1.0e-7f || (!bank.left.isActive() && !bank.right.isActive())) bank.active = false;
+    }
+    std::array<Bank, 2> banks;
+    StringParameters parameters;
+    double sampleRate = 48000.0;
+    float releaseMultiplier = 0.999f;
+    int current = 0, fadeLength = 240, fadeRemaining = 0;
 };
 
-/**
- * Polyphonic plucked-string synthesiser voice.
- *
- * Each voice contains two Karplus-Strong string models. The two strings are
- * tuned symmetrically around the target MIDI pitch to create a subtle
- * double-string / detune effect. A lightweight body resonator is then applied
- * as a shared post-filter, and the two strings are spread across the stereo
- * output according to the stereo width parameter.
- */
-class PluckedStringSynthVoice : public juce::SynthesiserVoice
+// Fixed voice pool and raw short-MIDI dispatch: no Synthesiser critical section,
+// temporary MIDI buffers, heap allocations, or container resizing in render().
+class VoiceManager
 {
 public:
-    PluckedStringSynthVoice() = default;
-
-    /**
-     * Prepare the internal DSP objects before audio processing starts.
-     *
-     * This should be called from PluginProcessor::prepareToPlay(), because the
-     * string models allocate their internal buffers during preparation.
-     *
-     * @param sampleRate current audio sample rate
-     */
-    void prepare(double sampleRate)
+    static constexpr int maxVoices = 16;
+    void prepare(double rate)
     {
-        stringLeft.prepare(sampleRate);
-        stringRight.prepare(sampleRate);
-
-        bodyResonator.prepare(sampleRate);
+        for (auto& voice : voices) voice.prepare(rate);
+        bends.fill(0.0f); sustain.fill(false); counter = 0;
     }
-
-    /**
-     * Update the synthesis parameters for this voice.
-     *
-     * These values are normally read from the AudioProcessorValueTreeState in
-     * PluginProcessor::processBlock() and passed into every active voice.
-     *
-     * @param newDecay feedback gain / sustain amount
-     * @param newDamping high-frequency damping in the feedback loop
-     * @param newBrightness brightness of the initial pluck excitation
-     * @param newPickPosition relative plucking position along the string
-     * @param newBodyResonance body-resonance post-filter amount
-     * @param newStereoWidth stereo spread of the two detuned strings
-     * @param newDetuneCents total detune amount in cents
-     */
-    void setStringParameters(float newDecay,
-        float newDamping,
-        float newBrightness,
-        float newPickPosition,
-        float newBodyResonance,
-        float newStereoWidth,
-        float newDetuneCents)
+    void setParameters(const StringParameters& p) noexcept { for (auto& v : voices) v.setParameters(p); }
+    void noteOn(int note, int channel, float velocity) noexcept
     {
-        decay = newDecay;
-        damping = newDamping;
-        brightness = newBrightness;
-        pickPosition = newPickPosition;
-
-        bodyResonance = juce::jlimit(0.0f, 1.0f, newBodyResonance);
-        stereoWidth = juce::jlimit(0.0f, 1.0f, newStereoWidth);
-        detuneCents = juce::jlimit(0.0f, 20.0f, newDetuneCents);
-
-        stringLeft.setDecay(decay);
-        stringLeft.setDamping(damping);
-        stringLeft.setBrightness(brightness);
-        stringLeft.setPickPosition(pickPosition);
-
-        stringRight.setDecay(decay);
-        stringRight.setDamping(damping);
-        stringRight.setBrightness(brightness);
-        stringRight.setPickPosition(pickPosition);
-
-        bodyResonator.setAmount(bodyResonance);
-    }
-
-    /**
-     * Start a new MIDI note.
-     *
-     * The MIDI note is converted to frequency, then used to trigger two
-     * Karplus-Strong strings. The left string is tuned slightly below the target
-     * pitch and the right string slightly above it.
-     *
-     * @param midiNoteNumber MIDI note number
-     * @param velocity MIDI velocity, normally between 0 and 1
-     * @param sound sound object assigned by the JUCE synthesiser
-     * @param currentPitchWheelPosition current pitch wheel value
-     */
-    void startNote(int midiNoteNumber,
-        float velocity,
-        juce::SynthesiserSound* sound,
-        int currentPitchWheelPosition) override
-    {
-        juce::ignoreUnused(sound, currentPitchWheelPosition);
-
-        const float baseFrequency =
-            static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(midiNoteNumber));
-
-        // Pick position, brightness and damping must be set before pluck(),
-        // because they affect the excitation and feedback loop of the new note.
-        stringLeft.setDecay(decay);
-        stringLeft.setDamping(damping);
-        stringLeft.setBrightness(brightness);
-        stringLeft.setPickPosition(pickPosition);
-
-        stringRight.setDecay(decay);
-        stringRight.setDamping(damping);
-        stringRight.setBrightness(brightness);
-        stringRight.setPickPosition(pickPosition);
-
-        // Symmetrical detuning around the target pitch.
-        //
-        // detuneCents is the total distance between the two strings:
-        // left  = -detuneCents / 2
-        // right = +detuneCents / 2
-        const float leftFrequency =
-            baseFrequency * std::pow(2.0f, -detuneCents / 2400.0f);
-
-        const float rightFrequency =
-            baseFrequency * std::pow(2.0f, detuneCents / 2400.0f);
-
-        stringLeft.pluck(leftFrequency, velocity);
-        stringRight.pluck(rightFrequency, velocity);
-
-        // Reset the resonator so that filter memory from a previous note does
-        // not colour the start of the new note.
-        bodyResonator.reset();
-        bodyResonator.setAmount(bodyResonance);
-
-        stringLeft.setKeyHeld(true);
-        stringRight.setKeyHeld(true);
-
-        currentLevel = 1.0f;
-        noteIsReleasing = false;
-
-        // For debugging
-        /*
-        DBG("Double-string note started: " << midiNoteNumber
-            << " base frequency: " << baseFrequency
-            << " left frequency: " << leftFrequency
-            << " right frequency: " << rightFrequency
-            << " detune cents: " << detuneCents
-            << " stereo width: " << stereoWidth);
-        */
-    }
-
-    /**
-     * Respond to a MIDI note-off message.
-     *
-     * If tail-off is allowed, the strings continue to decay naturally with a
-     * slightly faster release. Otherwise the voice is cleared immediately.
-     *
-     * @param velocity note-off velocity
-     * @param allowTailOff true if the voice should decay naturally
-     */
-    void stopNote(float velocity, bool allowTailOff) override
-    {
-        juce::ignoreUnused(velocity);
-
-        stringLeft.setKeyHeld(false);
-        stringRight.setKeyHeld(false);
-
-        noteIsReleasing = true;
-
-        if (!allowTailOff)
+        if (velocity <= 0.0f) { noteOff(note, channel); return; }
+        auto* chosen = &voices.front();
+        for (auto& voice : voices)
         {
-            stringLeft.reset();
-            stringRight.reset();
-            bodyResonator.reset();
-
-            clearCurrentNote();
+            if (!voice.isActive()) { chosen = &voice; break; }
+            if (voice.age() < chosen->age()) chosen = &voice;
+        }
+        chosen->start(note, channel, velocity, bends[static_cast<size_t>(channel - 1)], ++counter);
+    }
+    void noteOff(int note, int channel) noexcept
+    {
+        for (auto& v : voices) v.noteOff(note, channel, sustain[static_cast<size_t>(channel - 1)]);
+    }
+    void allNotesOff(int channel = 0, bool immediately = false) noexcept
+    {
+        for (auto& v : voices) v.allNotesOff(channel, immediately);
+    }
+    void handleMidi(const uint8_t* bytes, int size) noexcept
+    {
+        if (size < 1 || bytes[0] < 0x80 || bytes[0] >= 0xf0) return;
+        const int status = bytes[0] & 0xf0, channel = (bytes[0] & 0x0f) + 1;
+        if (size < 3) return;
+        const int a = bytes[1] & 0x7f, b = bytes[2] & 0x7f;
+        if (status == 0x90) noteOn(a, channel, static_cast<float>(b) / 127.0f);
+        else if (status == 0x80) noteOff(a, channel);
+        else if (status == 0xe0)
+        {
+            const int wheel = a + (b << 7);
+            const float bend = wheel >= 8192 ? (wheel - 8192) * (2.0f / 8191.0f)
+                                             : (wheel - 8192) * (2.0f / 8192.0f);
+            bends[static_cast<size_t>(channel - 1)] = bend;
+            for (auto& v : voices) v.pitchBend(channel, bend);
+        }
+        else if (status == 0xb0)
+        {
+            if (a == 64)
+            {
+                sustain[static_cast<size_t>(channel - 1)] = b >= 64;
+                if (b < 64) for (auto& v : voices) v.releaseSustain(channel);
+            }
+            else if (a == 120 || a == 123) allNotesOff(channel, a == 120);
         }
     }
-
-    /**
-     * Render this voice into the output buffer.
-     *
-     * The voice generates two detuned string signals, applies a shared body
-     * colouration, then distributes the strings across the stereo field. The
-     * output is added to the existing buffer contents, allowing multiple voices
-     * to play polyphonically.
-     *
-     * @param outputBuffer buffer to receive the rendered voice
-     * @param startSample first sample position to write into
-     * @param numSamples number of samples to render
-     */
-    void renderNextBlock(juce::AudioBuffer<float>& outputBuffer,
-        int startSample,
-        int numSamples) override
+    void render(juce::AudioBuffer<float>& buffer, int start, int count) noexcept
     {
-        bodyResonator.setAmount(bodyResonance);
-
-        for (int sample = 0; sample < numSamples; ++sample)
+        auto* left = buffer.getWritePointer(0);
+        auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
+        for (int i = start; i < start + count; ++i)
         {
-            float leftStringSample = stringLeft.processSample();
-            float rightStringSample = stringRight.processSample();
-
-            // The body resonator is applied to the combined string signal,
-            // representing a shared resonating instrument body.
-            const float bodyInput =
-                0.5f * (leftStringSample + rightStringSample);
-
-            const float bodySample =
-                bodyResonator.processSample(bodyInput);
-
-            // Blend individual string signals with the shared body colour.
-            leftStringSample =
-                0.75f * leftStringSample + 0.25f * bodySample;
-
-            rightStringSample =
-                0.75f * rightStringSample + 0.25f * bodySample;
-
-            if (noteIsReleasing)
-                currentLevel *= releaseMultiplier;
-
-            leftStringSample *= currentLevel;
-            rightStringSample *= currentLevel;
-
-            // stereoWidth = 0: both strings are centred.
-            // stereoWidth = 1: the two strings are spread left and right.
-            const float centreGain = 0.5f * (1.0f - stereoWidth);
-            const float sideGain = 0.5f + 0.5f * stereoWidth;
-
-            const float leftOutput =
-                sideGain * leftStringSample + centreGain * rightStringSample;
-
-            const float rightOutput =
-                centreGain * leftStringSample + sideGain * rightStringSample;
-
-            if (outputBuffer.getNumChannels() == 1)
-            {
-                const float monoOutput =
-                    0.5f * (leftOutput + rightOutput);
-
-                outputBuffer.addSample(0,
-                    startSample + sample,
-                    monoOutput);
-            }
-            else
-            {
-                outputBuffer.addSample(0,
-                    startSample + sample,
-                    leftOutput);
-
-                outputBuffer.addSample(1,
-                    startSample + sample,
-                    rightOutput);
-
-                // Extra output channels receive a safe mono sum.
-                for (int channel = 2; channel < outputBuffer.getNumChannels(); ++channel)
-                {
-                    const float monoOutput =
-                        0.5f * (leftOutput + rightOutput);
-
-                    outputBuffer.addSample(channel,
-                        startSample + sample,
-                        monoOutput);
-                }
-            }
-
-            // Free the voice once both strings are inactive or the release fade
-            // has become effectively silent.
-            if ((!stringLeft.getIsActive() && !stringRight.getIsActive())
-                || currentLevel < silenceLevel)
-            {
-                stringLeft.reset();
-                stringRight.reset();
-                bodyResonator.reset();
-
-                clearCurrentNote();
-                break;
-            }
+            float l = 0.0f, r = 0.0f;
+            for (auto& voice : voices) if (voice.isActive()) voice.render(l, r);
+            left[i] = right != nullptr ? l : 0.5f * (l + r);
+            if (right != nullptr) right[i] = r;
         }
     }
-
-    /**
-     * Pitch wheel input is not used in this implementation.
-     */
-    void pitchWheelMoved(int newPitchWheelValue) override
+    int activeVoices() const noexcept
     {
-        juce::ignoreUnused(newPitchWheelValue);
+        int count = 0; for (const auto& v : voices) if (v.isActive()) ++count; return count;
     }
-
-    /**
-     * MIDI controller input is not used in this implementation.
-     */
-    void controllerMoved(int controllerNumber, int newControllerValue) override
+    void copySnapshot(float* data, int count) const noexcept
     {
-        juce::ignoreUnused(controllerNumber, newControllerValue);
+        for (const auto& v : voices) if (v.isActive()) { v.copySnapshot(data, count); return; }
+        std::fill(data, data + count, 0.0f);
     }
-
-    /**
-     * Check whether this voice can play the supplied sound.
-     *
-     * @param sound sound assigned by the JUCE synthesiser
-     * @return true if the sound is a PluckedStringSynthSound
-     */
-    bool canPlaySound(juce::SynthesiserSound* sound) override
-    {
-        return dynamic_cast<PluckedStringSynthSound*>(sound) != nullptr;
-    }
-
 private:
-    // Internal sound generators
-    KarplusStrongString stringLeft;
-    KarplusStrongString stringRight;
-
-    // Shared body colouration stage
-    BodyResonator bodyResonator;
-
-    // Current synthesis parameters
-    float decay = 0.85f;
-    float damping = 0.4f;
-    float brightness = 0.9f;
-    float pickPosition = 0.20f;
-    float bodyResonance = 0.3f;
-    float stereoWidth = 0.5f;
-    float detuneCents = 5.0f;
-
-    // Voice release state
-    float currentLevel = 0.0f;
-    bool noteIsReleasing = false;
-
-    static constexpr float releaseMultiplier = 0.9995f;
-    static constexpr float silenceLevel = 0.0001f;
+    std::array<PluckedStringSynthVoice, maxVoices> voices;
+    std::array<float, 16> bends {};
+    std::array<bool, 16> sustain {};
+    uint64_t counter = 0;
 };
