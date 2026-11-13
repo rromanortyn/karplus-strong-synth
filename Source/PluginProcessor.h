@@ -1,96 +1,58 @@
-/*
-  ==============================================================================
-
-    This file contains the basic framework code for a JUCE plugin processor.
-
-    Main audio processor for the polyphonic extended Karplus-Strong plucked-string synthesiser.
-
-  ==============================================================================
-*/
-
 #pragma once
-
 #include <JuceHeader.h>
 #include "PluckedStringSynth.h"
 #include "MidiPatternGenerator.h"
+#include "ScopeFifo.h"
 
-//==============================================================================
-/**
-*/
-class KarplusStrong_PluckedStringAudioProcessor  : public juce::AudioProcessor
+class KarplusStrong_PluckedStringAudioProcessor : public juce::AudioProcessor
 {
 public:
-    //==============================================================================
     KarplusStrong_PluckedStringAudioProcessor();
-    ~KarplusStrong_PluckedStringAudioProcessor() override;
-
-    //==============================================================================
-    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    ~KarplusStrong_PluckedStringAudioProcessor() override = default;
+    void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
-
-   #ifndef JucePlugin_PreferredChannelConfigurations
-    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
-   #endif
-
-    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
-
-    //==============================================================================
+    bool isBusesLayoutSupported(const BusesLayout&) const override;
+    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     juce::AudioProcessorEditor* createEditor() override;
-    bool hasEditor() const override;
+    bool hasEditor() const override { return true; }
+    const juce::String getName() const override { return JucePlugin_Name; }
+    bool acceptsMidi() const override { return true; }
+    bool producesMidi() const override { return false; }
+    bool isMidiEffect() const override { return false; }
+    double getTailLengthSeconds() const override { return 12.0; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock&) override;
+    void setStateInformation(const void*, int) override;
 
-    //==============================================================================
-    const juce::String getName() const override;
-
-    bool acceptsMidi() const override;
-    bool producesMidi() const override;
-    bool isMidiEffect() const override;
-    double getTailLengthSeconds() const override;
-
-    //==============================================================================
-    int getNumPrograms() override;
-    int getCurrentProgram() override;
-    void setCurrentProgram (int index) override;
-    const juce::String getProgramName (int index) override;
-    void changeProgramName (int index, const juce::String& newName) override;
-
-    //==============================================================================
-    void getStateInformation (juce::MemoryBlock& destData) override;
-    void setStateInformation (const void* data, int sizeInBytes) override;
-
+    juce::AudioProcessorValueTreeState& state() noexcept { return apvts; }
+    ScopeFifo& scope() noexcept { return scopeFifo; }
+    ScopeFifo& delayScope() noexcept { return delayFifo; }
+    void setVisualisationEnabled(bool enabled) noexcept { visualisationEnabled.store(enabled); }
+    float takePeak() noexcept { return peak.exchange(0.0f); }
+    int activeVoiceCount() const noexcept { return displayedVoices.load(); }
 
 private:
-    //==============================================================================
-    // Parameter system
-    //
-    // APVTS provides host automation, parameter storage and preset/state saving.
+    enum Parameter { decay, damping, brightness, pickPosition, bodyResonance, stereoWidth,
+                     detune, outputGain, patternOn, patternRate, patternType, patternVelocity,
+                     exciteAmount, exciterType, impulseWidth, interpolation, pitchTransition, mono, count };
+    static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    float read(Parameter index) const noexcept;
     juce::AudioProcessorValueTreeState apvts;
-
-    // Core string parameters
-    std::atomic<float>* decayParam = nullptr;
-    std::atomic<float>* dampingParam = nullptr;
-    std::atomic<float>* brightnessParam = nullptr;
-    std::atomic<float>* pickPositionParam = nullptr;
-
-    // Tone and stereo parameters
-    std::atomic<float>* bodyResonanceParam = nullptr;
-    std::atomic<float>* stereoWidthParam = nullptr;
-    std::atomic<float>* detuneParam = nullptr;
-    std::atomic<float>* outputGainParam = nullptr;
-
-    // Internal PatternGenerator parameters
-    std::atomic<float>* patternOnParam = nullptr;
-    std::atomic<float>* patternRateParam = nullptr;
-    std::atomic<float>* patternTypeParam = nullptr;
-    std::atomic<float>* patternVelocityParam = nullptr;
-
-    // Tracks arpeggiator on/off changes so that timing can be reset cleanly.
-    bool previousPatternOn = false;
-
-    //==============================================================================
-    // Sound generation
-    juce::Synthesiser synth;
-    MidiPatternGenerator midiPatternGenerator;
-
-    //==============================================================================
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KarplusStrong_PluckedStringAudioProcessor)
+    std::array<std::atomic<float>*, count> values {};
+    VoiceManager voices;
+    MidiPatternGenerator pattern;
+    juce::SmoothedValue<float> gain, monoMix;
+    ScopeFifo scopeFifo, delayFifo;
+    std::atomic<bool> visualisationEnabled { false };
+    std::atomic<float> peak { 0.0f };
+    std::atomic<int> displayedVoices { 0 };
+    bool wasPatternOn = false;
+    bool prepared = false;
+    float highPassR = 0.997f;
+    std::array<float, 2> previousInput {}, previousOutput {};
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KarplusStrong_PluckedStringAudioProcessor)
 };

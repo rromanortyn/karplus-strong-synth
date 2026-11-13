@@ -1,57 +1,59 @@
-# Karplus–Strong Plucked-String Synthesiser
+# Karplus–Strong Virtual String Synth
 
-A polyphonic physical-modelling synthesiser developed with JUCE and based on an extended Karplus–Strong algorithm.
+A JUCE instrument implementing the UI and synthesis workflow in *Пояснювальна_записка_закінчено.pdf*, especially §§1.5, 2.3–2.5 and 3.4–3.6 and Figure 3.4. See [reference conformance](docs/reference-conformance.md) for the requirements, design decisions, and validation limits.
 
-## Overview
+The 700×500 main editor provides **Damping**, **Excite**, **Output**, three excitation buttons, a live oscilloscope, and a peak meter. It scales between 600×400 and 1200×800. Double-click a knob to restore its default; values can also be typed. Controls support host automation and session recall.
 
-This project implements a playable plucked-string audio plugin for use in a DAW. MIDI notes excite a delay-line feedback model that simulates the behaviour of a vibrating string.
+**Advanced** opens the additional model controls, linear/allpass interpolation, glide/crossfade pitch changes, and the existing internal MIDI patterns. Scroll to reach the lower controls. The visualisation selector provides the waveform, spectrum, and an actual delay-buffer snapshot. **Mono** sums the two output channels. Impulse width affects newly triggered notes with Impulse excitation selected. The scope scales its waveform automatically; the peak meter shows the actual output level in dBFS.
 
-The instrument is designed as a flexible synthetic plucked-string synthesiser rather than an exact emulation of a particular acoustic instrument.
+The synthesis engine provides 16 voices, oldest-voice stealing with a 5 ms crossfade, velocity-sensitive Noise / Filtered Noise / triangular Impulse excitation, a one-pole loop filter, calibrated fractional delay, ±2-semitone MIDI pitch bend, sustain pedal, all-notes/all-sound-off, and smoothed damping, output gain, and pitch transitions. Existing body, detune, stereo-width and pattern controls remain available in Advanced.
 
-## Features
+## Build
 
-- Polyphonic MIDI performance
-- Karplus–Strong delay-line synthesis
-- Adjustable brightness and damping
-- Pick-position modelling
-- Double-string detuning
-- Stereo width control
-- Simplified body resonance
-- Automatic MIDI pattern generation
-- Preset support
+Use JUCE **8.0.17-security** (commit `dabd5ad13cd869cba41046947fffc8e5ce5cd662`) and a C++17 compiler, CMake ≥3.22, and Ninja or another CMake generator.
 
-## Repository structure
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJUCE_PATH=/path/to/JUCE
+cmake --build build --parallel 4
+```
 
-- `Source/` — C++ source code
-- `KarplusStrong_PluckedString.jucer` — JUCE project file
-- `preset.RPL` — example REAPER preset
+Outputs are under `build/KarplusStrong_PluckedString_artefacts/Release/`:
 
-## Requirements
+- `VST3/KarplusStrong_PluckedString.vst3`
+- `Standalone/KarplusStrong_PluckedString` (platform-specific extension/bundle)
+- `AU/` on macOS only
 
-- JUCE
-- A compatible C++ development environment
-- A DAW supporting VST3 plugins for testing
+For a universal macOS build, also pass `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`. The minimum macOS deployment target is 11.0. The `.jucer` project also contains Visual Studio, Xcode, and Linux exporters; configure its JUCE module paths before exporting.
 
-## Building the project
+On Linux, development packages are needed for ALSA, X11/Xext/Xrandr/Xinerama/Xcursor, FreeType, Fontconfig, and OpenGL. The app does not require WebKit or network access at runtime. In the prepared cloud environment, activate its user-owned tools and headers first:
 
-1. Open `KarplusStrong_PluckedString.jucer` in Projucer.
-2. Confirm that the JUCE module paths are configured correctly.
-3. Save and open the generated IDE project.
-4. Build the VST3 plugin.
-5. Scan the generated plugin in a compatible DAW.
+```bash
+source /workspace/karplus-strong-env/activate.sh
+cmake -S /workspace/karplus-strong-synth -B /workspace/karplus-strong-synth/build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DJUCE_PATH=/workspace/karplus-strong-env/deps/JUCE
+cmake --build /workspace/karplus-strong-synth/build --parallel 4
+```
 
-## Documentation
+Use the existing checkout; cloud tasks are already isolated. Do not create a worktree unless explicitly requested.
 
-More detailed technical documentation is available here:
+## Validate
 
-1. [Context and project aims](docs/01-context-and-aims.md)
-2. [Synthesis design and implementation](docs/02-synthesis-design.md)
-3. [Pattern generator and creative use](docs/03-pattern-generator.md)
-4. [Limitations and future development](docs/04-limitations-and-future-work.md)
+```bash
+ctest --test-dir build --output-on-failure
+# Linux GUI checks and screenshots without physical audio hardware:
+xvfb-run -a ./build/SynthTests --gui "$PWD/build/screenshots"
+# Independent VST3 host (numpy, mido and pedalboard are preinstalled in the cloud venv):
+python Tests/host_smoke.py
+```
 
+The native suite tests parameter ranges, full-range tuning, every MIDI note across four sample rates and all exciters/interpolators, sample-accurate MIDI timing, 16-voice operation/stealing, sustain, state, mono routing, and absence of C++ heap allocations during the exercised audio callbacks. It also reports a local processing benchmark. GUI checks cover bindings, radio selection, reset defaults, the documented window sizes, and visualisation modes.
 
-## Academic context
+The independent host tests rendered tuning, chords, velocity, excitation types/width, pitch bend, mono, internal patterns, and preset restoration. Results and an audio example are written to `build/test-results/`. At the highest notes, strongly damped linear interpolation produces very short signals; their frequency is estimated from damped poles in the rendered audio rather than a biased finite-window FFT peak.
 
-This project was originally developed for an Audio Programming assignment as part of the MSc Acoustics and Music Technology programme at the University of Edinburgh.
+Windows/macOS, AU, and the five DAWs named in the PDF require validation on those platforms. Linux checks do not establish those compatibility claims or reproduce the PDF's hardware-specific benchmark.
 
-The repository contains the source code and project configuration. Compiled plugin binaries and assessment materials are not included.
+## Compatibility and resources
+
+Existing parameter IDs and their order are retained, with the reference controls appended. **Damping now means the document's alpha (0.05–1)**, and Output spans **−60 to +12 dB**. Old parameter values can be recalled, but the corrected model and changed ranges alter the sound and may change normalized host automation; do not expect old sessions or `preset.RPL` to sound identical. Keep a copy of an older build for faithful playback of older projects.
+
+Inter is bundled under the SIL Open Font License; see [its license](Resources/Inter-LICENSE.txt). Project details and the original algorithm discussion are in `docs/`.

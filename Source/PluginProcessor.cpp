@@ -1,426 +1,189 @@
-/*
-  ==============================================================================
-
-    This file contains the basic framework code for a JUCE plugin processor.
-
-    Main processor implementation for the polyphonic extended Karplus-Strong
-    plucked-string synthesiser.
-
-  ==============================================================================
-*/
-
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-//==============================================================================
+juce::AudioProcessorValueTreeState::ParameterLayout
+KarplusStrong_PluckedStringAudioProcessor::createLayout()
+{
+    using namespace juce;
+    AudioProcessorValueTreeState::ParameterLayout layout;
+    auto number = [&layout](const char* id, const char* name, float lo, float hi, float initial)
+    {
+        layout.add(std::make_unique<AudioParameterFloat>(ParameterID(id, 1), name,
+                    NormalisableRange<float>(lo, hi), initial,
+                    AudioParameterFloatAttributes().withStringFromValueFunction(
+                        [](float value, int) { return String(value, 2); })));
+    };
+    // Keep existing parameter IDs/order so saved sessions can still find controls.
+    number("decay", "Decay", 0, 1, 0.85f);
+    number("damping", "Damping", 0.05f, 1, 0.6f);
+    number("brightness", "Brightness (Soft to Sharp)", 0, 1, 1);
+    number("pickPosition", "Pick Position (Bridge to Centre)", 0.05f, 0.5f, 0.5f);
+    number("bodyResonance", "Body Resonance", 0, 1, 0);
+    number("stereoWidth", "Stereo Width", 0, 1, 0);
+    number("detune", "Detune (Cents)", 0, 20, 0);
+    number("outputGain", "Output Level (dB)", -60, 12, 0);
+    layout.add(std::make_unique<AudioParameterBool>(ParameterID("patternOn", 1), "Pattern Generator On/Off", false));
+    number("patternRate", "Pattern Speed (Slow to Fast)", 0.5f, 16, 4);
+    layout.add(std::make_unique<AudioParameterChoice>(ParameterID("patternType", 1), "MIDI Pattern",
+        StringArray { "Major", "Minor", "Open Fifths", "Cluster", "Bass Octave", "Wide Harp Sweep",
+                      "Suspended Pedal", "Chromatic Tension" }, 0));
+    number("patternVelocity", "Pattern Strength", 0, 1, 0.8f);
+    number("exciteAmount", "Excite Amount", 0, 1, 0.7f);
+    layout.add(std::make_unique<AudioParameterChoice>(ParameterID("exciterType", 1), "Excitation",
+        StringArray { "Noise", "Filtered Noise", "Impulse" }, 0));
+    number("impulseWidth", "Impulse Width", 0.05f, 0.95f, 0.5f);
+    layout.add(std::make_unique<AudioParameterChoice>(ParameterID("interpolation", 1), "Interpolation",
+        StringArray { "Linear", "Allpass" }, 0));
+    layout.add(std::make_unique<AudioParameterChoice>(ParameterID("pitchTransition", 1), "Pitch Transition",
+        StringArray { "Glide", "Crossfade" }, 0));
+    layout.add(std::make_unique<AudioParameterBool>(ParameterID("mono", 1), "Mono Output", false));
+    return layout;
+}
+
 KarplusStrong_PluckedStringAudioProcessor::KarplusStrong_PluckedStringAudioProcessor()
-#ifndef JucePlugin_PreferredChannelConfigurations
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       ),
-#endif
-    apvts(*this, nullptr, "MyTreeState",
-        {
-            // ===== Karplus-Strong string basic parameters =====
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("decay", 1),
-                "Decay",
-                0.0f,
-                1.0f,
-                0.85f),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("damping", 1),
-                "Damping (Bright to Mellow)",
-                0.0f,
-                1.0f,
-                0.4f),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("brightness", 1),
-                "Brightness (Soft to Sharp)",
-                0.0f,
-                1.0f,
-                0.9f),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("pickPosition", 1),
-                "Pick Position (Bridge to Centre)",
-                juce::NormalisableRange<float>(0.05f, 0.50f, 0.001f),
-                0.20f),
-
-            //==================================================================
-            // Body, stereo and output parameters
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("bodyResonance", 1),
-                "Body Resonance",
-                0.0f,
-                1.0f,
-                0.3f),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("stereoWidth", 1),
-                "Stereo Width",
-                0.0f,
-                1.0f,
-                0.6f),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("detune", 1),
-                "Detune (Cents)",
-                juce::NormalisableRange<float>(0.0f, 20.0f, 0.1f),
-                5.0f),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("outputGain", 1),
-                "Output Level (dB)",
-                -24.0f,
-                0.0f,
-                -8.0f),
-
-            //==================================================================
-            // Internal Midi pattern generator parameters
-            std::make_unique<juce::AudioParameterBool>(
-                juce::ParameterID("patternOn", 1),
-                "Pattern Generator On/Off",
-                false),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("patternRate", 1),
-                "Pattern Speed (Slow to Fast)",
-                0.5f,
-                16.0f,
-                4.0f),
-
-            std::make_unique<juce::AudioParameterChoice>(
-                juce::ParameterID("patternType", 1),
-                "MIDI Pattern",
-                juce::StringArray {
-                    "Major",
-                    "Minor",
-                    "Open Fifths",
-                    "Cluster",
-                    "Bass Octave",
-                    "Wide Harp Sweep",
-                    "Suspended Pedal",
-                    "Chromatic Tension"
-                },
-                0),
-
-            std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID("patternVelocity", 1),
-                "Pattern Strength",
-                0.0f,
-                1.0f,
-                0.8f)
-        })
+    : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts(*this, nullptr, "MyTreeState", createLayout())
 {
-    // Store raw parameter pointers for real-time-safe parameter reads in
-    // processBlock().
-    decayParam = apvts.getRawParameterValue("decay");
-    dampingParam = apvts.getRawParameterValue("damping");
-    brightnessParam = apvts.getRawParameterValue("brightness");
-
-    pickPositionParam = apvts.getRawParameterValue("pickPosition");
-    bodyResonanceParam = apvts.getRawParameterValue("bodyResonance");
-
-    stereoWidthParam = apvts.getRawParameterValue("stereoWidth");
-    detuneParam = apvts.getRawParameterValue("detune");
-
-    outputGainParam = apvts.getRawParameterValue("outputGain");
-
-    patternOnParam = apvts.getRawParameterValue("patternOn");
-    patternRateParam = apvts.getRawParameterValue("patternRate");
-    patternTypeParam = apvts.getRawParameterValue("patternType");
-    patternVelocityParam = apvts.getRawParameterValue("patternVelocity");
-
-
-    // Build the polyphonic synthesiser.
-    synth.clearVoices();
-
-    for (int i = 0; i < 8; ++i)
-        synth.addVoice(new PluckedStringSynthVoice());
-
-    synth.clearSounds();
-    synth.addSound(new PluckedStringSynthSound());
-
+    constexpr std::array<const char*, count> ids {{ "decay", "damping", "brightness", "pickPosition",
+        "bodyResonance", "stereoWidth", "detune", "outputGain", "patternOn", "patternRate",
+        "patternType", "patternVelocity", "exciteAmount", "exciterType", "impulseWidth",
+        "interpolation", "pitchTransition", "mono" }};
+    for (size_t i = 0; i < ids.size(); ++i) values[i] = apvts.getRawParameterValue(ids[i]);
 }
 
-KarplusStrong_PluckedStringAudioProcessor::~KarplusStrong_PluckedStringAudioProcessor()
+float KarplusStrong_PluckedStringAudioProcessor::read(Parameter index) const noexcept
 {
+    const float v = values[static_cast<size_t>(index)]->load(std::memory_order_relaxed);
+    return std::isfinite(v) ? v : 0.0f;
 }
 
-
-//==============================================================================
-void KarplusStrong_PluckedStringAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+void KarplusStrong_PluckedStringAudioProcessor::prepareToPlay(double rate, int)
 {
-
-    juce::ignoreUnused(samplesPerBlock);
-
-    synth.setCurrentPlaybackSampleRate(sampleRate);
-
-    midiPatternGenerator.prepare(sampleRate);
-
-    // Prepare all custom voices. Each voice owns its own string models and body
-    // resonator, so each one must receive the current sample rate.
-    for (int i = 0; i < synth.getNumVoices(); ++i)
-    {
-        if (auto* voice = dynamic_cast<PluckedStringSynthVoice*>(synth.getVoice(i)))
-        {
-            voice->prepare(sampleRate);
-        }
-    }
+    prepared = false;
+    if (!std::isfinite(rate) || rate < 8000.0) return;
+    voices.prepare(rate); pattern.prepare(rate);
+    gain.reset(rate, 0.05); gain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(read(outputGain)));
+    monoMix.reset(rate, 0.02); monoMix.setCurrentAndTargetValue(read(mono));
+    highPassR = static_cast<float>(std::exp(-juce::MathConstants<double>::twoPi * 20.0 / rate));
+    previousInput.fill(0.0f); previousOutput.fill(0.0f);
+    // An editor may remain open across host re-preparation. Leave FIFO cursors
+    // owned by their producer/consumer rather than resetting them under the GUI.
+    peak.store(0); wasPatternOn = false;
+    setLatencySamples(0); prepared = true;
 }
-
-void KarplusStrong_PluckedStringAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
-    juce::MidiBuffer& midiMessages)
-{
-    juce::ScopedNoDenormals noDenormals;
-
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-
-    // Clear any output channels that do not have corresponding input channels.
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear(i, 0, buffer.getNumSamples());
-
-    buffer.clear();
-
-    //====================== Read APVTS parameters =============================
-    // ===== Read sound parameters =====
-    const float decay = decayParam->load();
-    const float damping = dampingParam->load();
-    const float brightness = brightnessParam->load();
-
-    const float pickPosition = pickPositionParam->load();
-    const float bodyResonance = bodyResonanceParam->load();
-
-    const float stereoWidth = stereoWidthParam->load();
-    const float detuneCents = detuneParam->load();
-
-    const float outputGainDb = outputGainParam->load();
-
-    // ===== Read MIDI pattern generator parameters =====
-    const bool patternOn = patternOnParam->load() > 0.5f;
-    const float patternRate = patternRateParam->load();
-    const int patternType = static_cast<int>(patternTypeParam->load());
-    const float patternVelocity = patternVelocityParam->load();
-
-    // ========== Update all synth voices with the latest parameter values ==========
-    for (int i = 0; i < synth.getNumVoices(); ++i)
-    {
-        if (auto* voice = dynamic_cast<PluckedStringSynthVoice*>(synth.getVoice(i)))
-        {
-            voice->setStringParameters(decay,
-                damping,
-                brightness,
-                pickPosition,
-                bodyResonance,
-                stereoWidth,
-                detuneCents);
-        }
-    }
-
-    //======================================================================
-    // Handle MIDI pattern generator on/off transitions.
-    //
-    // When the pattern generator is switched off, all internally generated notes are
-    // released to avoid stuck notes.
-    if (previousPatternOn && !patternOn)
-    {
-        midiPatternGenerator.reset();
-        synth.allNotesOff(1, true);
-    }
-
-    previousPatternOn = patternOn;
-
-    midiPatternGenerator.setEnabled(patternOn);
-    midiPatternGenerator.setRateHz(patternRate);
-    midiPatternGenerator.setPattern(patternType);
-    midiPatternGenerator.setVelocity(patternVelocity);
-
-
-    //======================================================================
-    // Select the MIDI source.
-    juce::MidiBuffer processedMidi;
-
-    if (patternOn)
-    {
-        // Pattern mode:
-        // The plug-in generates its own MIDI note pattern internally.
-        midiPatternGenerator.process(processedMidi, buffer.getNumSamples());
-    }
-    else
-    {
-        // Manual MIDI mode:
-        // The plug-in responds to external MIDI input from the host.
-        processedMidi.addEvents(midiMessages,
-            0,
-            buffer.getNumSamples(),
-            0);
-    }
-
-    //======================================================================
-    // Render the polyphonic synthesiser.
-    synth.renderNextBlock(buffer,
-        processedMidi,
-        0,
-        buffer.getNumSamples());
-
-    // Apply final output gain after all voices have been summed.
-    const float outputGainLinear =
-        juce::Decibels::decibelsToGain(outputGainDb);
-
-    buffer.applyGain(outputGainLinear);
-}
-
-
-//==============================================================================
-const juce::String KarplusStrong_PluckedStringAudioProcessor::getName() const
-{
-    return JucePlugin_Name;
-}
-
-bool KarplusStrong_PluckedStringAudioProcessor::acceptsMidi() const
-{
-   #if JucePlugin_WantsMidiInput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool KarplusStrong_PluckedStringAudioProcessor::producesMidi() const
-{
-   #if JucePlugin_ProducesMidiOutput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool KarplusStrong_PluckedStringAudioProcessor::isMidiEffect() const
-{
-   #if JucePlugin_IsMidiEffect
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-double KarplusStrong_PluckedStringAudioProcessor::getTailLengthSeconds() const
-{
-    return 2.0;
-}
-
-int KarplusStrong_PluckedStringAudioProcessor::getNumPrograms()
-{
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
-}
-
-int KarplusStrong_PluckedStringAudioProcessor::getCurrentProgram()
-{
-    return 0;
-}
-
-void KarplusStrong_PluckedStringAudioProcessor::setCurrentProgram (int index)
-{
-}
-
-const juce::String KarplusStrong_PluckedStringAudioProcessor::getProgramName (int index)
-{
-    return {};
-}
-
-void KarplusStrong_PluckedStringAudioProcessor::changeProgramName (int index, const juce::String& newName)
-{
-}
-
-//==============================================================================
 
 void KarplusStrong_PluckedStringAudioProcessor::releaseResources()
 {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
+    voices.allNotesOff(0, true); prepared = false;
 }
 
-#ifndef JucePlugin_PreferredChannelConfigurations
-bool KarplusStrong_PluckedStringAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool KarplusStrong_PluckedStringAudioProcessor::isBusesLayoutSupported(const BusesLayout& layout) const
 {
-  #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
-    return true;
-  #else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-
-    // This checks if the input layout matches the output layout
-   #if ! JucePlugin_IsSynth
-    if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
-        return false;
-   #endif
-
-    return true;
-  #endif
+    return layout.getMainInputChannelSet().isDisabled()
+        && (layout.getMainOutputChannelSet() == juce::AudioChannelSet::mono()
+            || layout.getMainOutputChannelSet() == juce::AudioChannelSet::stereo());
 }
-#endif
 
-
-//==============================================================================
-bool KarplusStrong_PluckedStringAudioProcessor::hasEditor() const
+void KarplusStrong_PluckedStringAudioProcessor::processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi)
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    juce::ScopedNoDenormals noDenormals;
+    audio.clear();
+    if (!prepared || audio.getNumChannels() == 0 || audio.getNumSamples() == 0) return;
+    StringParameters p;
+    p.damping = juce::jlimit(0.05f, 1.0f, read(damping));
+    p.decay = juce::jlimit(0.0f, 1.0f, read(decay));
+    p.exciteAmount = juce::jlimit(0.0f, 1.0f, read(exciteAmount));
+    p.exciterType = juce::jlimit(0, 2, static_cast<int>(read(exciterType)));
+    p.impulseWidth = juce::jlimit(0.05f, 0.95f, read(impulseWidth));
+    p.interpolation = static_cast<int>(read(interpolation)) == 1 ? 1 : 0;
+    p.pitchTransition = static_cast<int>(read(pitchTransition)) == 1 ? 1 : 0;
+    p.brightness = juce::jlimit(0.0f, 1.0f, read(brightness));
+    p.pickPosition = juce::jlimit(0.05f, 0.5f, read(pickPosition));
+    p.body = juce::jlimit(0.0f, 1.0f, read(bodyResonance));
+    p.stereoWidth = juce::jlimit(0.0f, 1.0f, read(stereoWidth));
+    p.detune = juce::jlimit(0.0f, 20.0f, read(detune));
+    voices.setParameters(p);
+    const bool internal = read(patternOn) > 0.5f;
+    if (internal != wasPatternOn)
+    {
+        voices.allNotesOff(); pattern.reset(); wasPatternOn = internal;
+    }
+    if (internal)
+        pattern.render(voices, audio, read(patternRate), static_cast<int>(read(patternType)), read(patternVelocity));
+    else
+    {
+        int offset = 0;
+        for (const auto metadata : midi)
+        {
+            const int position = juce::jlimit(offset, audio.getNumSamples(), metadata.samplePosition);
+            voices.render(audio, offset, position - offset);
+            if (position < audio.getNumSamples()) voices.handleMidi(metadata.data, metadata.numBytes);
+            offset = position;
+        }
+        voices.render(audio, offset, audio.getNumSamples() - offset);
+    }
+    gain.setTargetValue(juce::Decibels::decibelsToGain(juce::jlimit(-60.0f, 12.0f, read(outputGain))));
+    monoMix.setTargetValue(read(mono) > 0.5f ? 1.0f : 0.0f);
+    float blockPeak = 0.0f;
+    std::array<float, 256> visual {};
+    const bool show = visualisationEnabled.load(std::memory_order_relaxed);
+    for (int i = 0; i < audio.getNumSamples(); ++i)
+    {
+        const float g = gain.getNextValue(), mix = monoMix.getNextValue();
+        const float centre = audio.getNumChannels() > 1
+            ? 0.5f * (audio.getSample(0, i) + audio.getSample(1, i)) : audio.getSample(0, i);
+        float visualSample = 0.0f;
+        for (int channel = 0; channel < juce::jmin(2, audio.getNumChannels()); ++channel)
+        {
+            const float input = (audio.getSample(channel, i) * (1.0f - mix) + centre * mix) * g;
+            const auto c = static_cast<size_t>(channel);
+            const float output = input - previousInput[c] + highPassR * previousOutput[c];
+            previousInput[c] = input; previousOutput[c] = output;
+            audio.setSample(channel, i, output);
+            blockPeak = juce::jmax(blockPeak, std::abs(output)); visualSample += output;
+        }
+        visual[static_cast<size_t>(i % 256)] = visualSample / static_cast<float>(juce::jmin(2, audio.getNumChannels()));
+        if (show && (i % 256 == 255 || i == audio.getNumSamples() - 1))
+            scopeFifo.push(visual.data(), i % 256 + 1);
+    }
+    if (show)
+    {
+        voices.copySnapshot(visual.data(), 256); delayFifo.push(visual.data(), 256);
+    }
+    peak.store(juce::jmax(peak.load(std::memory_order_relaxed), blockPeak), std::memory_order_relaxed);
+    displayedVoices.store(voices.activeVoices(), std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* KarplusStrong_PluckedStringAudioProcessor::createEditor()
 {
- //    return new KarplusStrong_PluckedStringAudioProcessorEditor (*this);
-    return new juce::GenericAudioProcessorEditor(*this);
+    return new KarplusStrong_PluckedStringAudioProcessorEditor(*this);
 }
-
-//==============================================================================
-void KarplusStrong_PluckedStringAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+void KarplusStrong_PluckedStringAudioProcessor::getStateInformation(juce::MemoryBlock& data)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-
-    auto state = apvts.copyState();
-    std::unique_ptr<juce::XmlElement> xml(state.createXml());
-    copyXmlToBinary(*xml, destData);
-
+    auto tree = apvts.copyState(); tree.setProperty("schemaVersion", 2, nullptr);
+    if (auto xml = tree.createXml()) copyXmlToBinary(*xml, data);
 }
-
-void KarplusStrong_PluckedStringAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+void KarplusStrong_PluckedStringAudioProcessor::setStateInformation(const void* data, int size)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
-
-    std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
-    if (xmlState.get() != nullptr)
-    {
-        if (xmlState->hasTagName(apvts.state.getType()))
+    if (data == nullptr || size <= 0) return;
+    if (auto xml = getXmlFromBinary(data, size))
+        if (xml->hasTagName(apvts.state.getType()))
         {
-            apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
+            auto tree = juce::ValueTree::fromXml(*xml);
+            for (auto child : tree)
+            {
+                if (auto* parameter = apvts.getParameter(child.getProperty("id").toString()))
+                {
+                    const float v = static_cast<float>(child.getProperty("value"));
+                    child.setProperty("value", std::isfinite(v)
+                        ? parameter->convertFrom0to1(parameter->convertTo0to1(v))
+                        : parameter->convertFrom0to1(parameter->getDefaultValue()), nullptr);
+                }
+            }
+            apvts.replaceState(tree);
         }
-    }
-
 }
 
-//==============================================================================
-// This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new KarplusStrong_PluckedStringAudioProcessor();

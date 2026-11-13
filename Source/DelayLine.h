@@ -1,183 +1,113 @@
-/*
-  ==============================================================================
-
-    DelayLine.h
-    Created: 2026 April
-    For Audio Programming Assignment 3
-
-  ==============================================================================
-*/
-
 #pragma once
-
-#include <vector>
+#include <JuceHeader.h>
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
-/**
- * Fractional delay line using a circular buffer.
- *
- * This class only manages the delay buffer itself:
- * - setting a maximum delay size
- * - setting a fractional delay time
- * - reading from the delayed position using linear interpolation
- * - writing a new sample into the buffer
- * - advancing the read/write positions
- *
- * Feedback is intentionally not handled inside this class. For the
- * Karplus-Strong model, feedback, damping and decay will be implemented
- * in a separate KarplusStrongString class.
- */
+// Allocated in prepare only. Two read heads allow pitch changes to crossfade.
 class DelayLine
 {
 public:
-
-    /**
-     * Set the maximum delay size in samples and allocate the circular buffer.
-     *
-     * @param _maxSizeInSamples maximum delay size in samples
-     */
-    void setMaximumDelaySize(int _maxSizeInSamples)
+    void prepare(int maximumSize, double sampleRate)
     {
-        if (_maxSizeInSamples < 2)
-            _maxSizeInSamples = 2;
-
-        maximumBufferSize = _maxSizeInSamples;
-
-        circularBuffer.clear();
-        circularBuffer.resize(maximumBufferSize, 0.0f);
-
-        writePos = 0;
-        delayTimeInSamples = 1.0f;
-
-        updateReadPosition();
+        buffer.assign(static_cast<size_t>(maximumSize), 0.0f);
+        ramp.reset(sampleRate, 0.02);
+        fadeLength = juce::jmax(1, static_cast<int>(sampleRate * 0.02));
+        clear();
     }
-
-    /**
-     * Clear the delay buffer and reset the read/write positions.
-     */
-    void clear()
+    void clear() noexcept
     {
-        std::fill(circularBuffer.begin(), circularBuffer.end(), 0.0f);
-
-        writePos = 0;
-        updateReadPosition();
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        writePosition = 0; current = {}; previous = {}; fadeRemaining = 0;
+        targetDelay = 1.0f;
+        ramp.setCurrentAndTargetValue(1.0f);
     }
-
-    /**
-     * Set the delay time in samples.
-     *
-     * This can be fractional, which is useful for more accurate pitch
-     * tuning in the Karplus-Strong string model.
-     *
-     * @param _delayTimeInSamples delay time in samples
-     */
-    void setDelayTimeInSamples(float _delayTimeInSamples)
+    void setDelay(float delay, float omega, int interpolation, int transition, bool immediate = false,
+                  float coefficient = 0.0f) noexcept
     {
-        if (_delayTimeInSamples < 1.0f)
-            _delayTimeInSamples = 1.0f;
-
-        if (_delayTimeInSamples >= static_cast<float>(maximumBufferSize - 1))
-            _delayTimeInSamples = static_cast<float>(maximumBufferSize - 1);
-
-        delayTimeInSamples = _delayTimeInSamples;
-
-        updateReadPosition();
-    }
-
-    /**
-     * Read the delayed sample using linear interpolation.
-     *
-     * @return delayed sample
-     */
-    float read() const
-    {
-        if (maximumBufferSize <= 0)
-            return 0.0f;
-
-        const int indexA = static_cast<int>(std::floor(readPos));
-
-        int indexB = indexA + 1;
-
-        if (indexB >= maximumBufferSize)
-            indexB = 0;
-
-        const float sampleA = circularBuffer[indexA];
-        const float sampleB = circularBuffer[indexB];
-
-        const float fraction = readPos - static_cast<float>(indexA);
-
-        return sampleA + fraction * (sampleB - sampleA);
-    }
-
-    /**
-     * Write one sample into the delay line at the current write position.
-     *
-     * @param inputSample sample to write into the circular buffer
-     */
-    void write(float inputSample)
-    {
-        if (maximumBufferSize <= 0)
+        delay = juce::jlimit(1.0f, static_cast<float>(buffer.size() - 2), delay);
+        if (!immediate && std::abs(delay - targetDelay) < 0.000001f && interpolation == current.mode
+            && std::abs(coefficient - targetCoefficient) < 0.000001f)
             return;
-
-        circularBuffer[writePos] = inputSample;
+        targetDelay = delay;
+        targetCoefficient = coefficient;
+        if (immediate)
+        {
+            current = { delay, omega, interpolation, 0.0f, 0.0f };
+            ramp.setCurrentAndTargetValue(delay); fadeRemaining = 0;
+        }
+        else if (transition == 1 || interpolation != current.mode)
+        {
+            previous = current;
+            current = { delay, omega, interpolation, current.x1, current.y1 };
+            ramp.setCurrentAndTargetValue(delay); fadeRemaining = fadeLength;
+        }
+        else
+        {
+            current.omega = omega; ramp.setTargetValue(delay);
+        }
+        updateCoefficient(current);
+        if (!ramp.isSmoothing()) current.coefficient = targetCoefficient;
     }
-
-    /**
-     * Advance both read and write positions by one sample.
-     */
-    void advance()
+    float read() noexcept
     {
-        readPos += 1.0f;
-        writePos += 1;
-
-        if (readPos >= static_cast<float>(maximumBufferSize))
-            readPos -= static_cast<float>(maximumBufferSize);
-
-        if (writePos >= maximumBufferSize)
-            writePos = 0;
+        if (ramp.isSmoothing())
+        {
+            current.delay = ramp.getNextValue(); updateCoefficient(current);
+            if (!ramp.isSmoothing()) current.coefficient = targetCoefficient;
+        }
+        const float value = readTap(current);
+        if (fadeRemaining == 0) return value;
+        const float mix = 1.0f - static_cast<float>(fadeRemaining--) / static_cast<float>(fadeLength);
+        return readTap(previous) * (1.0f - mix) + value * mix;
     }
-
-    /**
-     * Convenience function:
-     * read delayed sample, write new sample, then advance positions.
-     *
-     * This is useful for simple delay-line use, but in Karplus-Strong we may
-     * still prefer to call read(), write(), and advance() separately for clarity.
-     *
-     * @param inputSample sample to write into the delay line
-     * @return delayed sample read before writing
-     */
-    float process(float inputSample)
+    void write(float value) noexcept { buffer[static_cast<size_t>(writePosition)] = value; }
+    void advance() noexcept { if (++writePosition == static_cast<int>(buffer.size())) writePosition = 0; }
+    void copySnapshot(float* destination, int count) const noexcept
     {
-        const float delayedSample = read();
-
-        write(inputSample);
-        advance();
-
-        return delayedSample;
+        const int period = juce::jmax(1, static_cast<int>(current.delay));
+        for (int i = 0; i < count; ++i)
+        {
+            int index = writePosition - period + i * period / count;
+            if (index < 0) index += static_cast<int>(buffer.size());
+            destination[i] = buffer[static_cast<size_t>(index)];
+        }
     }
-
 private:
-
-    /**
-     * Recalculate the read position from the write position and delay time.
-     */
-    void updateReadPosition()
+    struct Tap
     {
-        readPos = static_cast<float>(writePos) - delayTimeInSamples;
-
-        while (readPos < 0.0f)
-            readPos += static_cast<float>(maximumBufferSize);
-
-        while (readPos >= static_cast<float>(maximumBufferSize))
-            readPos -= static_cast<float>(maximumBufferSize);
+        float delay = 1.0f, omega = 0.0f;
+        int mode = 0;
+        float x1 = 0.0f, y1 = 0.0f, coefficient = 0.0f;
+    };
+    static void updateCoefficient(Tap& tap) noexcept
+    {
+        if (tap.mode == 0) return;
+        const float fraction = tap.delay - std::floor(tap.delay);
+        const float denominator = std::sin(0.5f * tap.omega * (1.0f + fraction));
+        tap.coefficient = denominator > 1.0e-9f
+            ? std::sin(0.5f * tap.omega * (1.0f - fraction)) / denominator
+            : (1.0f - fraction) / (1.0f + fraction);
     }
-
-    std::vector<float> circularBuffer;
-
-    float delayTimeInSamples = 1.0f;
-    float readPos = 0.0f;
-
-    int maximumBufferSize = 2;
-    int writePos = 0;
+    float readTap(Tap& tap) noexcept
+    {
+        const int integer = static_cast<int>(tap.delay);
+        const float fraction = tap.delay - static_cast<float>(integer);
+        int index = writePosition - integer;
+        if (index < 0) index += static_cast<int>(buffer.size());
+        const float x = buffer[static_cast<size_t>(index)];
+        if (tap.mode == 1 && fraction > 0.00001f)
+        {
+            const float y = tap.coefficient * (x - tap.y1) + tap.x1;
+            tap.x1 = x; tap.y1 = y; return y;
+        }
+        if (--index < 0) index += static_cast<int>(buffer.size());
+        return x + fraction * (buffer[static_cast<size_t>(index)] - x);
+    }
+    std::vector<float> buffer;
+    Tap current, previous;
+    juce::SmoothedValue<float> ramp;
+    int writePosition = 0, fadeLength = 960, fadeRemaining = 0;
+    float targetDelay = 1.0f;
+    float targetCoefficient = 0.0f;
 };

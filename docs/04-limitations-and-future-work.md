@@ -4,8 +4,10 @@ Several areas could be developed further.
 
 ## Fractional Delay
 
-A more advanced fractional-delay implementation could improve pitch
-accuracy, particularly for higher notes with short delay lengths.
+Both linear and allpass fractional delay now use calibrated closed-loop tuning.
+The independent host suite checks all 128 notes in both modes against a
+±2-cent target. Very high linear-mode notes decay quickly because interpolation
+removes energy; allpass mode preserves the sustain more effectively.
 
 ## Body Modelling
 
@@ -22,5 +24,6 @@ materials, gestures, and playing techniques.
 
 ## User Interface
 
-A custom graphical interface would make the plugin more intuitive than
-the current generic parameter view.
+The custom editor now follows the supplied reference, including the live scope,
+peak meter and advanced controls. Future work includes testing it in the Windows
+and macOS hosts listed in the reference and conducting listening evaluations.
