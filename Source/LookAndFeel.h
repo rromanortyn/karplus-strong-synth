@@ -1,6 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
-#include <BinaryData.h>
+// JuceHeader.h includes the generated BinaryData header for both build systems.
 
 class KSLookAndFeel : public juce::LookAndFeel_V4
 {

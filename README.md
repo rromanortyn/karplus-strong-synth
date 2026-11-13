@@ -25,6 +25,8 @@ Outputs are under `build/KarplusStrong_PluckedString_artefacts/Release/`:
 
 For a universal macOS build, also pass `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`. The minimum macOS deployment target is 11.0. The `.jucer` project also contains Visual Studio, Xcode, and Linux exporters; configure its JUCE module paths before exporting.
 
+After pulling changes, Projucer users must reopen `KarplusStrong_PluckedString.jucer` and choose **Save Project and Open in IDE** before rebuilding. This regenerates `JuceLibraryCode/BinaryData.h` and its compiled sources from the bundled `Resources/Inter.ttf`. Existing generated Visual Studio/Xcode projects do not automatically pick up new binary resources. Keep the font's **Binary Resource** flag and **Include BinaryData in JuceHeader** enabled.
+
 On Linux, development packages are needed for ALSA, X11/Xext/Xrandr/Xinerama/Xcursor, FreeType, Fontconfig, and OpenGL. The app does not require WebKit or network access at runtime. In the prepared cloud environment, activate its user-owned tools and headers first:
 
 ```bash

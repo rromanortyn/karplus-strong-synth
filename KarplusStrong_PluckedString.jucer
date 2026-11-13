@@ -2,6 +2,7 @@
 
 <JUCERPROJECT id="KlPBBK" name="KarplusStrong_PluckedString" projectType="audioplug"
               useAppConfig="0" addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1"
+              includeBinaryInJuceHeader="1"
               pluginCharacteristicsValue="pluginIsSynth,pluginWantsMidiIn"
               pluginFormats="buildVST3,buildAU,buildStandalone" version="1.0.0"
               companyName="KarplusStrong" pluginManufacturerCode="Kpls" pluginCode="Kstr">
