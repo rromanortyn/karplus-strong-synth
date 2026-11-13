@@ -7,6 +7,15 @@ struct StringTuning
 {
     double delay = 1.0, coefficient = 0.0, radius = 1.0;
 
+    // -arg(H(exp(j*omega))) / omega, in samples. Pitch compensation needs
+    // phase delay, not group delay; both tend to (1-alpha)/alpha at DC.
+    static double filterPhaseDelay(double omega, double alpha) noexcept
+    {
+        const double b = 1.0 - alpha;
+        if (omega == 0.0) return b / alpha;
+        return std::atan2(b * std::sin(omega), 1.0 - b * std::cos(omega)) / omega;
+    }
+
     // Calibrate the damped closed-loop pole, not just its unit-circle phase.
     // Linear interpolation has loss, so its pole radius also affects tuning.
     // Only called at note/parameter changes; no allocation or per-sample search.
@@ -14,7 +23,7 @@ struct StringTuning
     {
         using Complex = std::complex<double>;
         const double b = 1.0 - alpha;
-        const double ideal = (6.283185307179586 - std::atan2(b * std::sin(omega), 1.0 - b * std::cos(omega))) / omega;
+        const double ideal = 6.283185307179586 / omega - filterPhaseDelay(omega, alpha);
         const int base = static_cast<int>(std::floor(ideal));
         const Complex unit = std::polar(1.0, -omega);
         int integer = base;

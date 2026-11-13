@@ -34,6 +34,22 @@ Sustain (CC64), all-notes/all-sound-off (CC123/120), and the existing internal p
 
 ## Validation evidence and limits
 
+### Adaptive damping compensation
+
+For `H(z) = alpha / (1 - (1-alpha) z^-1)`, the phase delay in samples is
+`Dphase(omega) = atan2((1-alpha) sin(omega), 1-(1-alpha) cos(omega)) / omega`.
+Its DC limit is `(1-alpha)/alpha`; that expression is not the group delay at
+every frequency. The initial delay estimate is `Fs/f0 - Dphase(omega)`, then
+the closed-loop solver accounts for decay and fractional interpolation.
+There is no additional fixed half-sample subtraction. Changing Damping calls
+`tune` for active strings, updating compensation for the new alpha. The filter
+and delay transitions take 20 ms; transient pitch modulation during a control
+change is still possible because smoothing alpha and delay independently does
+not enforce the resonance condition at every intermediate sample.
+
+Tests verify the DC limit, cancellation of the filter phase at several
+frequencies/alpha values, and the complete loop resonance across the MIDI range.
+
 - Native engine suite: parameter ranges, 3072 tuning cases, 3072 note/exciter/interpolator/rate rendering cases, sample-accurate MIDI, release, 16 voices/stealing, sustain, automation extremes, visual queues, state/invalid state, mono buses and zero added latency.
 - Independent host: 256 rendered pitch cases at 48 kHz (128 notes × two modes, alpha=1), eight pitch-bend mode/direction combinations, stereo chords at 44.1/48/96 kHz, velocity/excitation/width, mono, patterns, and preset restoration. It enforces a ±2-cent limit. Sustaining notes use FFT; the very short highest linear-mode notes use autoregressive damped-pole estimation from rendered samples. The current run's numeric results are in `build/test-results/host-smoke.json`.
 - Native GUI suite: main controls, automation, radio selection, double-click defaults, 600×400 / 700×500 / 1200×800 snapshots, Advanced, spectrum and delay displays. Artifacts are overwritten rather than appended.

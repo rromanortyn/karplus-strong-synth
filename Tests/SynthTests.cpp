@@ -72,6 +72,22 @@ float process(Processor& p, juce::AudioBuffer<float>& audio, juce::MidiBuffer& m
 }
 void engineTests()
 {
+    for (double alpha : {0.05, 0.2, 0.6, 1.0})
+    {
+        const double dcDelay = (1.0 - alpha) / alpha;
+        require(std::abs(StringTuning::filterPhaseDelay(0.0, alpha) - dcDelay) < 1.0e-12,
+                "Incorrect DC filter delay");
+        require(std::abs(StringTuning::filterPhaseDelay(1.0e-8, alpha) - dcDelay) < 1.0e-9,
+                "Filter phase delay does not approach its low-frequency limit");
+        for (double omega : {0.01, 0.1, 1.0, 2.0})
+        {
+            const auto q = std::polar(1.0, -omega);
+            const auto filter = alpha / (1.0 - (1.0 - alpha) * q);
+            const auto compensation = std::polar(1.0, omega * StringTuning::filterPhaseDelay(omega, alpha));
+            require(std::abs(std::arg(filter * compensation)) < 1.0e-12,
+                    "Adaptive delay does not cancel the one-pole filter phase");
+        }
+    }
     double worstPoleError = 0;
     for (double rate : {44100.0, 48000.0, 96000.0, 192000.0})
         for (double alpha : {0.05, 0.6, 1.0})
